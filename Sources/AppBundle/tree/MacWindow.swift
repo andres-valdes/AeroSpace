@@ -221,24 +221,75 @@ private func unbindAndGetBindingDataForNewWindow(_ windowId: UInt32, _ macApp: M
     }
 }
 
-// The function is private because it's unsafe. It leaves the window in unbound state
+// The function is internal (not private) for testability. It leaves the window in unbound state
 @MainActor
-private func unbindAndGetBindingDataForNewTilingWindow(_ workspace: Workspace, window: Window?) -> BindingData {
+func unbindAndGetBindingDataForNewTilingWindow(_ workspace: Workspace, window: Window?) -> BindingData {
     window?.unbindFromParent() // It's important to unbind to get correct data from below
     let mruWindow = workspace.mostRecentWindowRecursive
+    dwindleLog("unbindAndGetBindingData: mruWindow=\(mruWindow.map { "\($0.windowId)" } ?? "nil"), rootLayout=\(workspace.rootTilingContainer.layout), rootOrientation=\(workspace.rootTilingContainer.orientation)")
     if let mruWindow, let tilingParent = mruWindow.parent as? TilingContainer {
+        dwindleLog("  mruWindow.parent layout=\(tilingParent.layout), orientation=\(tilingParent.orientation), children=\(tilingParent.children.count)")
+        if tilingParent.layout == .dwindle {
+            let result = dwindleInsert(mruWindow: mruWindow, parent: tilingParent)
+            dwindleLog("  AFTER insert, tree:\n\(dwindleTreeDump(workspace.rootTilingContainer, indent: "    "))")
+            return result
+        }
         return BindingData(
             parent: tilingParent,
             adaptiveWeight: WEIGHT_AUTO,
             index: mruWindow.ownIndex.orDie() + 1,
         )
     } else {
+        dwindleLog("  no mruWindow or parent not TilingContainer, binding to root")
         return BindingData(
             parent: workspace.rootTilingContainer,
             adaptiveWeight: WEIGHT_AUTO,
             index: INDEX_BIND_LAST,
         )
     }
+}
+
+/// Split the MRU window's position into a new branch containing the MRU window and a slot for the new window.
+@MainActor
+private func dwindleInsert(mruWindow: Window, parent: TilingContainer) -> BindingData {
+    let rect = mruWindow.lastAppliedLayoutVirtualRect!
+    let orientation: Orientation = rect.width >= rect.height ? .h : .v
+    dwindleLog("  dwindleInsert: mruRect=\(rect.width)x\(rect.height) → orientation=\(orientation)")
+
+    // Unbind MRU and create a branch in its place
+    let mruData = mruWindow.unbindFromParent()
+    let branch = TilingContainer(parent: parent, adaptiveWeight: mruData.adaptiveWeight, orientation, .dwindle, index: mruData.index)
+    mruWindow.bind(to: branch, adaptiveWeight: WEIGHT_AUTO, index: 0)
+
+    return BindingData(parent: branch, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
+}
+
+private let dwindleLogPath = "/tmp/aerospace-dwindle.log"
+
+private func dwindleLog(_ message: String) {
+    let entry = "\(Date()): \(message)\n"
+    if let handle = FileHandle(forWritingAtPath: dwindleLogPath) {
+        handle.seekToEndOfFile()
+        handle.write(entry.data(using: .utf8)!)
+        handle.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: dwindleLogPath, contents: entry.data(using: .utf8))
+    }
+}
+
+@MainActor
+private func dwindleTreeDump(_ node: TreeNode, indent: String = "") -> String {
+    var result = ""
+    if let container = node as? TilingContainer {
+        result += "\(indent)\(container.orientation)_\(container.layout) [\n"
+        for child in container.children {
+            result += dwindleTreeDump(child, indent: indent + "  ")
+        }
+        result += "\(indent)]\n"
+    } else if let window = node as? Window {
+        result += "\(indent)window(\(window.windowId))\n"
+    }
+    return result
 }
 
 @MainActor
