@@ -247,8 +247,12 @@ func unbindAndGetBindingDataForNewTilingWindow(_ workspace: Workspace, window: W
 /// Split the MRU window's position into a new branch containing the MRU window and a slot for the new window.
 @MainActor
 private func dwindleInsert(mruWindow: Window, parent: TilingContainer) -> BindingData {
-    let rect = mruWindow.lastAppliedLayoutVirtualRect!
-    let orientation: Orientation = rect.width >= rect.height ? .h : .v
+    let orientation: Orientation
+    if let rect = mruWindow.lastAppliedLayoutVirtualRect {
+        orientation = rect.width >= rect.height ? .h : .v
+    } else {
+        orientation = parent.orientation
+    }
 
     // Unbind MRU and create a branch in its place
     let mruData = mruWindow.unbindFromParent()
