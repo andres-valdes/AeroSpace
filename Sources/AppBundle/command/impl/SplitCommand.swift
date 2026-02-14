@@ -32,7 +32,7 @@ struct SplitCommand: Command {
                         parent: parent,
                         adaptiveWeight: data.adaptiveWeight,
                         orientation,
-                        .tiles,
+                        parent.layout,
                         index: data.index,
                     )
                     window.bind(to: newParent, adaptiveWeight: WEIGHT_AUTO, index: 0)

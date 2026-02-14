@@ -14,6 +14,9 @@ struct MoveCommand: Command {
         guard let parent = currentWindow.parent else { return false }
         switch parent.cases {
             case .tilingContainer(let parent):
+                if parent.layout == .dwindle {
+                    return dwindleMove(window: currentWindow, direction: direction, io, args, env)
+                }
                 let indexOfCurrent = currentWindow.ownIndex.orDie()
                 let indexOfSiblingTarget = indexOfCurrent + direction.focusOffset
                 if parent.orientation == direction.orientation && parent.children.indices.contains(indexOfSiblingTarget) {
@@ -136,6 +139,24 @@ private let moveOutMacosUnconventionalWindow = "moving macOS fullscreen, minimiz
     check(prevRoot != workspace.rootTilingContainer)
     prevRoot.bind(to: workspace.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: 0)
     window.bind(to: workspace.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: direction.insertionOffset)
+}
+
+/// Dwindle move: swap with the nearest window in the target direction (same logic as focus).
+@MainActor private func dwindleMove(
+    window: Window,
+    direction: CardinalDirection,
+    _ io: CmdIo,
+    _ args: MoveCmdArgs,
+    _ env: CmdEnv,
+) -> Bool {
+    if let (parent, ownIndex) = window.closestParent(hasChildrenInDirection: direction, withLayout: nil) {
+        let sibling = parent.children[ownIndex + direction.focusOffset]
+        guard let targetWindow = sibling.findLeafWindowRecursive(snappedTo: direction.opposite) else { return false }
+        swapWindows(window, targetWindow)
+        return true
+    } else {
+        return true // At workspace boundary — no-op for dwindle
+    }
 }
 
 @MainActor private func deepMoveIn(window: Window, into container: TilingContainer, moveDirection: CardinalDirection) -> Bool {

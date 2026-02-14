@@ -221,12 +221,15 @@ private func unbindAndGetBindingDataForNewWindow(_ windowId: UInt32, _ macApp: M
     }
 }
 
-// The function is private because it's unsafe. It leaves the window in unbound state
+// The function is internal (not private) for testability. It leaves the window in unbound state
 @MainActor
-private func unbindAndGetBindingDataForNewTilingWindow(_ workspace: Workspace, window: Window?) -> BindingData {
+func unbindAndGetBindingDataForNewTilingWindow(_ workspace: Workspace, window: Window?) -> BindingData {
     window?.unbindFromParent() // It's important to unbind to get correct data from below
     let mruWindow = workspace.mostRecentWindowRecursive
     if let mruWindow, let tilingParent = mruWindow.parent as? TilingContainer {
+        if tilingParent.layout == .dwindle {
+            return dwindleInsert(mruWindow: mruWindow, parent: tilingParent)
+        }
         return BindingData(
             parent: tilingParent,
             adaptiveWeight: WEIGHT_AUTO,
@@ -239,6 +242,20 @@ private func unbindAndGetBindingDataForNewTilingWindow(_ workspace: Workspace, w
             index: INDEX_BIND_LAST,
         )
     }
+}
+
+/// Split the MRU window's position into a new branch containing the MRU window and a slot for the new window.
+@MainActor
+private func dwindleInsert(mruWindow: Window, parent: TilingContainer) -> BindingData {
+    let rect = mruWindow.lastAppliedLayoutVirtualRect!
+    let orientation: Orientation = rect.width >= rect.height ? .h : .v
+
+    // Unbind MRU and create a branch in its place
+    let mruData = mruWindow.unbindFromParent()
+    let branch = TilingContainer(parent: parent, adaptiveWeight: mruData.adaptiveWeight, orientation, .dwindle, index: mruData.index)
+    mruWindow.bind(to: branch, adaptiveWeight: WEIGHT_AUTO, index: 0)
+
+    return BindingData(parent: branch, adaptiveWeight: WEIGHT_AUTO, index: INDEX_BIND_LAST)
 }
 
 @MainActor
