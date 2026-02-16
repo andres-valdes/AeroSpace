@@ -78,6 +78,51 @@ extension TreeNode {
         set { setWeight(.v, newValue) }
     }
 
+    /// Compute the index path from an ancestor node down to a descendant window.
+    /// Used by dwindle spatial targeting to mirror the window's position across subtrees.
+    @MainActor
+    func indexPath(to descendant: Window) -> [Int] {
+        var path: [Int] = []
+        var current: TreeNode = descendant
+        while current !== self {
+            if let index = current.ownIndex {
+                path.append(index)
+            }
+            guard let parent = current.parent else { break }
+            current = parent as TreeNode
+        }
+        return path.reversed()
+    }
+
+    /// Walk into a subtree, mirroring the source window's position for perpendicular
+    /// containers and picking the entry edge for same-orientation containers.
+    /// Used by dwindle focus and move to find spatially correct targets.
+    @MainActor
+    func findDwindleSpatialTarget(
+        direction: CardinalDirection,
+        path: ArraySlice<Int>,
+    ) -> Window? {
+        if let window = self as? Window { return window }
+        guard let container = self as? TilingContainer else { return nil }
+
+        let child: TreeNode?
+        let remainingPath = path.dropFirst()
+
+        if container.orientation == direction.orientation {
+            // Same orientation as move: pick the entry edge
+            child = direction.isPositive ? container.children.first : container.children.last
+        } else if let index = path.first {
+            // Perpendicular: mirror the window's position
+            let clampedIndex = min(index, container.children.count - 1)
+            child = container.children[clampedIndex]
+        } else {
+            // Path exhausted: fall back to MRU
+            child = container.mostRecentChild
+        }
+
+        return child.flatMap { $0.findDwindleSpatialTarget(direction: direction, path: remainingPath) }
+    }
+
     /// Returns closest parent that has children in the specified direction relative to `self`
     func closestParent(
         hasChildrenInDirection direction: CardinalDirection,

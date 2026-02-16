@@ -19,8 +19,16 @@ struct FocusCommand: Command {
             case .direction(let direction):
                 let window = target.windowOrNil
                 if let (parent, ownIndex) = window?.closestParent(hasChildrenInDirection: direction, withLayout: nil) {
-                    guard let windowToFocus = parent.children[ownIndex + direction.focusOffset]
-                        .findLeafWindowRecursive(snappedTo: direction.opposite) else { return false }
+                    let sibling = parent.children[ownIndex + direction.focusOffset]
+                    let windowToFocus: Window?
+                    if parent.layout == .dwindle, let window {
+                        let innerMostChild = parent.children[ownIndex]
+                        let path = innerMostChild.indexPath(to: window)
+                        windowToFocus = sibling.findDwindleSpatialTarget(direction: direction, path: path[...])
+                    } else {
+                        windowToFocus = sibling.findLeafWindowRecursive(snappedTo: direction.opposite)
+                    }
+                    guard let windowToFocus else { return false }
                     return windowToFocus.focusWindow()
                 } else {
                     return hitWorkspaceBoundaries(target, io, args, direction)

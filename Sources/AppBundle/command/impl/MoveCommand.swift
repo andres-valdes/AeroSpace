@@ -141,7 +141,7 @@ private let moveOutMacosUnconventionalWindow = "moving macOS fullscreen, minimiz
     window.bind(to: workspace.rootTilingContainer, adaptiveWeight: WEIGHT_AUTO, index: direction.insertionOffset)
 }
 
-/// Dwindle move: swap with the nearest window in the target direction (same logic as focus).
+/// Dwindle move: swap with the spatially nearest window in the target direction.
 @MainActor private func dwindleMove(
     window: Window,
     direction: CardinalDirection,
@@ -150,9 +150,12 @@ private let moveOutMacosUnconventionalWindow = "moving macOS fullscreen, minimiz
     _ env: CmdEnv,
 ) -> Bool {
     if let (parent, ownIndex) = window.closestParent(hasChildrenInDirection: direction, withLayout: nil) {
+        let innerMostChild = parent.children[ownIndex]
         let sibling = parent.children[ownIndex + direction.focusOffset]
-        guard let targetWindow = sibling.findLeafWindowRecursive(snappedTo: direction.opposite) else { return false }
+        let path = innerMostChild.indexPath(to: window)
+        guard let targetWindow = sibling.findDwindleSpatialTarget(direction: direction, path: path[...]) else { return false }
         swapWindows(window, targetWindow)
+        window.markAsMostRecentChild()
         return true
     } else {
         return true // At workspace boundary — no-op for dwindle
