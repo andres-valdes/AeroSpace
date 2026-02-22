@@ -502,6 +502,100 @@ final class DwindleLayoutTest: XCTestCase {
         assertEquals(focus.windowOrNil?.windowId, UInt32(6))
     }
 
+    // MARK: - Move-node-to-workspace tests
+
+    /// Moving a window from workspace A to dwindle workspace B (which has || layout)
+    /// should use dwindle insertion (split MRU window), not just append to root container.
+    func testDwindle_moveNodeToWorkspace_usesDwindleInsertion() async throws {
+        // Workspace A: one window
+        let workspaceA = Workspace.get(byName: "a")
+        workspaceA.rootTilingContainer.apply {
+            _ = TestWindow.new(id: 1, parent: $0).focusWindow()
+        }
+
+        // Workspace B: dwindle with two windows side by side (||)
+        let workspaceB = Workspace.get(byName: "b")
+        let rootB = workspaceB.rootTilingContainer
+        let w2 = TestWindow.new(id: 2, parent: rootB)
+        TestWindow.new(id: 3, parent: rootB)
+        // Focus w2 so it becomes MRU — new window should split w2
+        assertEquals(w2.focusWindow(), true)
+        w2.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 960, height: 1080)
+
+        assertEquals(rootB.layoutDescription, .h_dwindle([
+            .window(2),
+            .window(3),
+        ]))
+
+        // Move w1 from workspace A to workspace B
+        // Focus w1 first so it's the subject of the move
+        assertEquals(TestWindow.get(byId: 1)!.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        // Should use dwindle insertion: split MRU window (w2), NOT append as |||
+        assertEquals(rootB.layoutDescription, .h_dwindle([
+            .v_dwindle([.window(2), .window(1)]),
+            .window(3),
+        ]))
+    }
+
+    /// join-with in a dwindle workspace should create a dwindle container
+    /// with orientation based on the target window's rect (wider = .h, taller = .v).
+    func testDwindle_joinWith_usesDwindleOrientation() async throws {
+        let workspace = Workspace.get(byName: "a")
+        let root = workspace.rootTilingContainer
+        let w1 = TestWindow.new(id: 1, parent: root)
+        assertEquals(w1.focusWindow(), true)
+        let w2 = TestWindow.new(id: 2, parent: root)
+        let w3 = TestWindow.new(id: 3, parent: root)
+        // Give w2 a wide rect so the dwindle split should be horizontal
+        w2.lastAppliedLayoutVirtualRect = .init(topLeftX: 640, topLeftY: 0, width: 1280, height: 540)
+
+        assertEquals(root.layoutDescription, .h_dwindle([
+            .window(1),
+            .window(2),
+            .window(3),
+        ]))
+
+        // join-with right: w1 should split into w2's position using dwindle logic
+        try await JoinWithCommand(args: JoinWithCmdArgs(rawArgs: [], direction: .right)).run(.defaultEnv, .emptyStdin)
+
+        // w2 is wide → horizontal dwindle split; w1 joins as first child (positive direction)
+        assertEquals(root.layoutDescription, .h_dwindle([
+            .h_dwindle([
+                .window(1),
+                .window(2),
+            ]),
+            .window(3),
+        ]))
+    }
+
+    /// join-with in a dwindle workspace where the target is a container (not a window)
+    /// should fall back to parent.orientation.opposite for the new container orientation.
+    func testDwindle_joinWith_containerTarget_fallback() async throws {
+        let workspace = Workspace.get(byName: "a")
+        let root = workspace.rootTilingContainer
+        let w1 = TestWindow.new(id: 1, parent: root)
+        let vBranch = TilingContainer(parent: root, adaptiveWeight: 1, .v, .dwindle, index: INDEX_BIND_LAST)
+        TestWindow.new(id: 2, parent: vBranch)
+        TestWindow.new(id: 3, parent: vBranch)
+        assertEquals(w1.focusWindow(), true)
+
+        // join-with right: target is v_dwindle([w2, w3]) — a container, not a window.
+        // Falls back to parent.orientation.opposite: root is .h → new container is .v
+        try await JoinWithCommand(args: JoinWithCmdArgs(rawArgs: [], direction: .right)).run(.defaultEnv, .emptyStdin)
+
+        assertEquals(root.layoutDescription, .h_dwindle([
+            .v_dwindle([
+                .window(1),
+                .v_dwindle([
+                    .window(2),
+                    .window(3),
+                ]),
+            ]),
+        ]))
+    }
+
     func testDwindle_moveRight_atBoundary() async throws {
         let (root, _, _, _, w4) = buildFourWindowTree()
         assertEquals(w4.focusWindow(), true)
@@ -516,5 +610,427 @@ final class DwindleLayoutTest: XCTestCase {
             .window(1),
             .v_dwindle([.window(2), .h_dwindle([.window(3), .window(4)])]),
         ]))
+    }
+
+    // MARK: - Binary property preservation tests
+
+    /// Helper: recursively assert that every dwindle container has at most 2 children.
+    private func assertDwindleBinaryProperty(_ container: TilingContainer, file: StaticString = #filePath, line: UInt = #line) {
+        if container.layout == .dwindle {
+            XCTAssertLessThanOrEqual(
+                container.children.count, 2,
+                "Dwindle container has \(container.children.count) children (expected ≤ 2): \(container.layoutDescription)",
+                file: file, line: line
+            )
+        }
+        for child in container.children {
+            if let childContainer = child as? TilingContainer {
+                assertDwindleBinaryProperty(childContainer, file: file, line: line)
+            }
+        }
+    }
+
+    /// Move a window to another workspace and back — tree should remain binary.
+    func testDwindle_moveToWorkspaceAndBack_preservesBinary() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let rootA = wsA.rootTilingContainer
+
+        // Build a 3-window dwindle tree in workspace A
+        let w1 = TestWindow.new(id: 1, parent: rootA)
+        let vBranch = TilingContainer(parent: rootA, adaptiveWeight: 1, .v, .dwindle, index: INDEX_BIND_LAST)
+        let w2 = TestWindow.new(id: 2, parent: vBranch)
+        TestWindow.new(id: 3, parent: vBranch)
+        w2.lastAppliedLayoutVirtualRect = .init(topLeftX: 960, topLeftY: 0, width: 960, height: 540)
+        assertEquals(w1.focusWindow(), true)
+        w1.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 960, height: 1080)
+
+        assertEquals(rootA.layoutDescription, .h_dwindle([
+            .window(1),
+            .v_dwindle([.window(2), .window(3)]),
+        ]))
+
+        // Move w1 to workspace B
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        // Normalize workspace A after removal
+        config.enableNormalizationFlattenContainers = true
+        wsA.normalizeContainers()
+
+        assertDwindleBinaryProperty(wsA.rootTilingContainer)
+
+        // Move w1 back to workspace A (focus it first)
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "a")).run(.defaultEnv, .emptyStdin)
+
+        assertDwindleBinaryProperty(wsA.rootTilingContainer)
+    }
+
+    /// Removing a window and then inserting a new one should maintain binary property.
+    func testDwindle_removeAndInsert_preservesBinary() {
+        let workspace = Workspace.get(byName: "a")
+
+        // Build 4-window tree
+        _ = addDwindleWindow(id: 1, to: workspace, rect: .init(topLeftX: 0, topLeftY: 0, width: 1920, height: 1080))
+        let w2 = addDwindleWindow(id: 2, to: workspace, rect: .init(topLeftX: 960, topLeftY: 0, width: 960, height: 1080))
+        _ = addDwindleWindow(id: 3, to: workspace, rect: .init(topLeftX: 960, topLeftY: 540, width: 960, height: 540))
+        _ = addDwindleWindow(id: 4, to: workspace, rect: .init(topLeftX: 960, topLeftY: 540, width: 480, height: 540))
+
+        assertDwindleBinaryProperty(workspace.rootTilingContainer)
+
+        // Remove w2 and normalize
+        config.enableNormalizationFlattenContainers = true
+        w2.unbindFromParent()
+        workspace.normalizeContainers()
+
+        assertDwindleBinaryProperty(workspace.rootTilingContainer)
+
+        // Insert a new window — should still be binary
+        _ = addDwindleWindow(id: 5, to: workspace, rect: .init(topLeftX: 0, topLeftY: 0, width: 960, height: 540))
+
+        assertDwindleBinaryProperty(workspace.rootTilingContainer)
+    }
+
+    /// With opposite-orientation normalization disabled, same-orientation nesting is preserved.
+    /// This is the recommended config for dwindle (enable-normalization-opposite-orientation-for-nested-containers = false).
+    func testDwindle_normalization_disabled_preservesSameOrientationNesting() {
+        let workspace = Workspace.get(byName: "a")
+        let root = workspace.rootTilingContainer
+
+        // Create h_dwindle inside h_dwindle (same-orientation nesting, valid for dwindle)
+        let hBranch = TilingContainer(parent: root, adaptiveWeight: 1, .h, .dwindle, index: INDEX_BIND_LAST)
+        TestWindow.new(id: 1, parent: hBranch)
+        TestWindow.new(id: 2, parent: hBranch)
+        TestWindow.new(id: 3, parent: root)
+
+        assertEquals(root.layoutDescription, .h_dwindle([
+            .h_dwindle([.window(1), .window(2)]),
+            .window(3),
+        ]))
+
+        // With opposite-orientation normalization OFF, orientations are preserved
+        config.enableNormalizationOppositeOrientationForNestedContainers = false
+        workspace.normalizeContainers()
+
+        assertEquals(workspace.rootTilingContainer.layoutDescription, .h_dwindle([
+            .h_dwindle([.window(1), .window(2)]),
+            .window(3),
+        ]))
+    }
+
+    /// Multiple move-node-to-workspace operations should maintain binary property.
+    func testDwindle_multipleWorkspaceMoves_preservesBinary() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        // Create 3 windows in workspace A
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        w1.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 1920, height: 1080)
+        assertEquals(w1.focusWindow(), true)
+
+        let w2 = addDwindleWindow(id: 2, to: wsA, rect: .init(topLeftX: 960, topLeftY: 0, width: 960, height: 1080))
+        let w3 = addDwindleWindow(id: 3, to: wsA, rect: .init(topLeftX: 960, topLeftY: 540, width: 960, height: 540))
+
+        assertDwindleBinaryProperty(wsA.rootTilingContainer)
+
+        // Move w2 to workspace B
+        assertEquals(w2.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        config.enableNormalizationFlattenContainers = true
+        wsA.normalizeContainers()
+
+        assertDwindleBinaryProperty(wsA.rootTilingContainer)
+        assertDwindleBinaryProperty(wsB.rootTilingContainer)
+
+        // Move w3 to workspace B
+        assertEquals(w3.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        wsA.normalizeContainers()
+
+        assertDwindleBinaryProperty(wsA.rootTilingContainer)
+        assertDwindleBinaryProperty(wsB.rootTilingContainer)
+
+        // Move w1 to workspace B (all 3 in B now)
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        wsA.normalizeContainers()
+
+        assertDwindleBinaryProperty(wsB.rootTilingContainer)
+    }
+
+    /// Dwindle insertion with same-orientation rect creates same-orientation nesting.
+    /// With opposite-orientation normalization disabled, the nesting is preserved after flattening.
+    func testDwindle_insertSameOrientation_preservedWithNormalizationOff() {
+        let workspace = Workspace.get(byName: "a")
+
+        // First window: wide rect
+        _ = addDwindleWindow(id: 1, to: workspace, rect: .init(topLeftX: 0, topLeftY: 0, width: 1920, height: 1080))
+        // Second window: also wide (same as parent h orientation → h inside h)
+        _ = addDwindleWindow(id: 2, to: workspace, rect: .init(topLeftX: 0, topLeftY: 0, width: 1920, height: 1080))
+
+        // Before normalization: should have h_dwindle inside h_dwindle
+        assertEquals(workspace.rootTilingContainer.layoutDescription, .h_dwindle([
+            .h_dwindle([.window(1), .window(2)]),
+        ]))
+
+        // After normalization with opposite-orientation disabled (recommended for dwindle)
+        config.enableNormalizationFlattenContainers = true
+        config.enableNormalizationOppositeOrientationForNestedContainers = false
+        workspace.normalizeContainers()
+
+        // Root had 1 child → flattened. Orientation preserved as .h
+        assertEquals(workspace.rootTilingContainer.layoutDescription, .h_dwindle([
+            .window(1), .window(2),
+        ]))
+    }
+
+    /// After multiple swaps via move command, binary property is maintained.
+    func testDwindle_multipleSwaps_preservesBinary() async throws {
+        let (root, w1, _, w3, w4) = buildFourWindowTree()
+
+        // Series of moves
+        assertEquals(w4.focusWindow(), true)
+        try await MoveCommand(args: MoveCmdArgs(rawArgs: [], .left)).run(.defaultEnv, .emptyStdin)  // w4 ↔ w3
+        assertDwindleBinaryProperty(root)
+
+        assertEquals(w4.focusWindow(), true)
+        try await MoveCommand(args: MoveCmdArgs(rawArgs: [], .up)).run(.defaultEnv, .emptyStdin)    // w4 ↔ w2
+        assertDwindleBinaryProperty(root)
+
+        assertEquals(w1.focusWindow(), true)
+        try await MoveCommand(args: MoveCmdArgs(rawArgs: [], .right)).run(.defaultEnv, .emptyStdin) // w1 ↔ MRU of right subtree
+        assertDwindleBinaryProperty(root)
+
+        assertEquals(w3.focusWindow(), true)
+        try await MoveCommand(args: MoveCmdArgs(rawArgs: [], .left)).run(.defaultEnv, .emptyStdin)  // w3 ↔ w1 (now left)
+        assertDwindleBinaryProperty(root)
+    }
+
+    /// join-with should maintain binary property on the resulting tree.
+    func testDwindle_joinWith_preservesBinary() async throws {
+        let workspace = Workspace.get(byName: "a")
+        let root = workspace.rootTilingContainer
+        let w1 = TestWindow.new(id: 1, parent: root)
+        TestWindow.new(id: 2, parent: root)
+        let w3 = TestWindow.new(id: 3, parent: root)
+
+        // join-with right from w1
+        assertEquals(w1.focusWindow(), true)
+        w1.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 640, height: 1080)
+        try await JoinWithCommand(args: JoinWithCmdArgs(rawArgs: [], direction: .right)).run(.defaultEnv, .emptyStdin)
+        assertDwindleBinaryProperty(root)
+
+        // join-with left from w3
+        assertEquals(w3.focusWindow(), true)
+        try await JoinWithCommand(args: JoinWithCmdArgs(rawArgs: [], direction: .left)).run(.defaultEnv, .emptyStdin)
+        assertDwindleBinaryProperty(root)
+    }
+
+    // MARK: - Move-to-workspace: exhaustive permutations
+
+    /// BUG REPRO: When workspace has a floating window as MRU, moving a tiling window
+    /// into it bypasses dwindleInsert and appends directly to root, creating a 3rd child.
+    func testDwindle_moveToWorkspace_withFloatingWindowMRU_preservesBinary() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        // Workspace A: one tiling window
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        assertEquals(w1.focusWindow(), true)
+
+        // Workspace B: two tiling windows + one floating window
+        let rootB = wsB.rootTilingContainer
+        let w2 = TestWindow.new(id: 2, parent: rootB)
+        TestWindow.new(id: 3, parent: rootB)
+        w2.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 960, height: 1080)
+
+        // Add a floating window to workspace B and focus it (makes it the workspace MRU)
+        let wFloat = TestWindow.new(id: 99, parent: wsB, adaptiveWeight: WEIGHT_AUTO)
+        assertEquals(wFloat.focusWindow(), true)
+
+        // Now focus w1 (on workspace A) to make it the subject of the move
+        assertEquals(w1.focusWindow(), true)
+
+        // Move w1 to workspace B — should NOT append to root as 3rd child
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        assertDwindleBinaryProperty(wsB.rootTilingContainer)
+    }
+
+    /// Move into workspace with 2 tiling windows (MRU = first child).
+    func testDwindle_moveToWorkspace_2windows_mruFirst() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        assertEquals(w1.focusWindow(), true)
+
+        let rootB = wsB.rootTilingContainer
+        let w2 = TestWindow.new(id: 2, parent: rootB)
+        TestWindow.new(id: 3, parent: rootB)
+        assertEquals(w2.focusWindow(), true)
+        w2.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 960, height: 1080)
+
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        assertDwindleBinaryProperty(rootB)
+        assertEquals(rootB.children.count, 2)
+    }
+
+    /// Move into workspace with 2 tiling windows (MRU = second child).
+    func testDwindle_moveToWorkspace_2windows_mruSecond() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        assertEquals(w1.focusWindow(), true)
+
+        let rootB = wsB.rootTilingContainer
+        TestWindow.new(id: 2, parent: rootB)
+        let w3 = TestWindow.new(id: 3, parent: rootB)
+        assertEquals(w3.focusWindow(), true)
+        w3.lastAppliedLayoutVirtualRect = .init(topLeftX: 960, topLeftY: 0, width: 960, height: 1080)
+
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        assertDwindleBinaryProperty(rootB)
+        assertEquals(rootB.children.count, 2)
+    }
+
+    /// Move into deep binary tree (MRU = leaf node deep in tree).
+    func testDwindle_moveToWorkspace_deepTree_mruDeepLeaf() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        assertEquals(w1.focusWindow(), true)
+
+        // Build a 4-window tree in workspace B
+        let rootB = wsB.rootTilingContainer
+        TestWindow.new(id: 2, parent: rootB)
+        let vBranch = TilingContainer(parent: rootB, adaptiveWeight: 1, .v, .dwindle, index: INDEX_BIND_LAST)
+        TestWindow.new(id: 3, parent: vBranch)
+        let hBranch = TilingContainer(parent: vBranch, adaptiveWeight: 1, .h, .dwindle, index: INDEX_BIND_LAST)
+        let w4 = TestWindow.new(id: 4, parent: hBranch)
+        TestWindow.new(id: 5, parent: hBranch)
+        assertEquals(w4.focusWindow(), true)
+        w4.lastAppliedLayoutVirtualRect = .init(topLeftX: 960, topLeftY: 540, width: 480, height: 540)
+
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        assertDwindleBinaryProperty(rootB)
+    }
+
+    /// Move two windows sequentially into the same workspace.
+    func testDwindle_moveToWorkspace_twoSequentialMoves() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        let w2 = TestWindow.new(id: 2, parent: wsA.rootTilingContainer)
+
+        // Workspace B has 2 windows
+        let rootB = wsB.rootTilingContainer
+        let w3 = TestWindow.new(id: 3, parent: rootB)
+        TestWindow.new(id: 4, parent: rootB)
+        assertEquals(w3.focusWindow(), true)
+        w3.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 960, height: 1080)
+
+        // Move w1 to B
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        assertDwindleBinaryProperty(rootB)
+
+        // Move w2 to B
+        assertEquals(w2.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        assertDwindleBinaryProperty(rootB)
+    }
+
+    /// Move three windows sequentially into the same workspace.
+    func testDwindle_moveToWorkspace_threeSequentialMoves() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        let w2 = TestWindow.new(id: 2, parent: wsA.rootTilingContainer)
+        let w3 = TestWindow.new(id: 3, parent: wsA.rootTilingContainer)
+
+        // Workspace B has 1 window
+        let rootB = wsB.rootTilingContainer
+        let w4 = TestWindow.new(id: 4, parent: rootB)
+        assertEquals(w4.focusWindow(), true)
+        w4.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 1920, height: 1080)
+
+        // Move w1
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        assertDwindleBinaryProperty(rootB)
+
+        // Move w2
+        assertEquals(w2.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        assertDwindleBinaryProperty(rootB)
+
+        // Move w3
+        assertEquals(w3.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+        assertDwindleBinaryProperty(rootB)
+    }
+
+    /// Move into workspace where MRU window has no lastAppliedLayoutVirtualRect.
+    func testDwindle_moveToWorkspace_mruWithoutRect() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        assertEquals(w1.focusWindow(), true)
+
+        // Workspace B: 2 windows, MRU has NO rect (simulates window that hasn't been laid out)
+        let rootB = wsB.rootTilingContainer
+        let w2 = TestWindow.new(id: 2, parent: rootB)
+        TestWindow.new(id: 3, parent: rootB)
+        assertEquals(w2.focusWindow(), true)
+        // NOTE: w2.lastAppliedLayoutVirtualRect is nil
+
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        assertDwindleBinaryProperty(rootB)
+        assertEquals(rootB.children.count, 2)
+    }
+
+    /// Move into workspace after normalization has flattened containers.
+    func testDwindle_moveToWorkspace_afterNormalization() async throws {
+        let wsA = Workspace.get(byName: "a")
+        let wsB = Workspace.get(byName: "b")
+
+        let w1 = TestWindow.new(id: 1, parent: wsA.rootTilingContainer)
+        assertEquals(w1.focusWindow(), true)
+
+        // Workspace B: build a tree, remove a window, normalize
+        let rootB = wsB.rootTilingContainer
+        TestWindow.new(id: 2, parent: rootB)
+        let vBranch = TilingContainer(parent: rootB, adaptiveWeight: 1, .v, .dwindle, index: INDEX_BIND_LAST)
+        let w3 = TestWindow.new(id: 3, parent: vBranch)
+        let w4 = TestWindow.new(id: 4, parent: vBranch)
+        assertEquals(w4.focusWindow(), true)
+        w4.lastAppliedLayoutVirtualRect = .init(topLeftX: 960, topLeftY: 540, width: 960, height: 540)
+
+        // Remove w3 → v_dwindle has 1 child → normalize flattens it
+        w3.unbindFromParent()
+        config.enableNormalizationFlattenContainers = true
+        wsB.normalizeContainers()
+
+        // Should now be h_dwindle([w2, w4])
+        assertDwindleBinaryProperty(wsB.rootTilingContainer)
+
+        // Move w1 into the normalized workspace
+        assertEquals(w1.focusWindow(), true)
+        try await MoveNodeToWorkspaceCommand(args: MoveNodeToWorkspaceCmdArgs(workspace: "b")).run(.defaultEnv, .emptyStdin)
+
+        assertDwindleBinaryProperty(wsB.rootTilingContainer)
     }
 }

@@ -55,18 +55,23 @@ private func moveTilingWindow(_ window: Window) {
     let targetWorkspace = mouseLocation.monitorApproximation.activeWorkspace
     let swapTarget = mouseLocation.findIn(tree: targetWorkspace.rootTilingContainer, virtual: false)?.takeIf { $0 != window }
     if targetWorkspace != window.nodeWorkspace { // Move window to a different monitor
-        let index: Int = if let swapTarget, let parent = swapTarget.parent as? TilingContainer, let targetRect = swapTarget.lastAppliedLayoutPhysicalRect {
-            mouseLocation.getProjection(parent.orientation) >= targetRect.center.getProjection(parent.orientation)
-                ? swapTarget.ownIndex.orDie() + 1
-                : swapTarget.ownIndex.orDie()
+        if targetWorkspace.rootTilingContainer.layout == .dwindle {
+            let data = unbindAndGetBindingDataForNewTilingWindow(targetWorkspace, window: window)
+            window.bind(to: data.parent, adaptiveWeight: data.adaptiveWeight, index: data.index)
         } else {
-            0
+            let index: Int = if let swapTarget, let parent = swapTarget.parent as? TilingContainer, let targetRect = swapTarget.lastAppliedLayoutPhysicalRect {
+                mouseLocation.getProjection(parent.orientation) >= targetRect.center.getProjection(parent.orientation)
+                    ? swapTarget.ownIndex.orDie() + 1
+                    : swapTarget.ownIndex.orDie()
+            } else {
+                0
+            }
+            window.bind(
+                to: swapTarget?.parent ?? targetWorkspace.rootTilingContainer,
+                adaptiveWeight: WEIGHT_AUTO,
+                index: index,
+            )
         }
-        window.bind(
-            to: swapTarget?.parent ?? targetWorkspace.rootTilingContainer,
-            adaptiveWeight: WEIGHT_AUTO,
-            index: index,
-        )
     } else if let swapTarget {
         swapWindows(window, swapTarget)
     }
