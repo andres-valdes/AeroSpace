@@ -22,7 +22,16 @@ struct JoinWithCommand: Command {
             // Use dwindle logic: pick orientation based on target window's rect dimensions
             if let targetWindow = joinWithTarget as? Window,
                let rect = targetWindow.lastAppliedLayoutVirtualRect {
-                newOrientation = rect.width >= rect.height ? .h : .v
+                let dwindleOrientation: Orientation = rect.width >= rect.height ? .h : .v
+                // When the current window is the only remaining child (joinWithTarget already
+                // unbound), the parent will become a singleton after the join and get flattened
+                // by normalization. If the new container has the same orientation as the parent,
+                // flattening undoes the join entirely. Fall back to opposite orientation.
+                if dwindleOrientation == parent.orientation && parent.children.count == 1 {
+                    newOrientation = parent.orientation.opposite
+                } else {
+                    newOrientation = dwindleOrientation
+                }
             } else {
                 newOrientation = parent.orientation.opposite
             }
@@ -40,8 +49,18 @@ struct JoinWithCommand: Command {
         )
         currentWindow.unbindFromParent()
 
+        let currentWindowIndex: Int
+        if let currentRect = currentWindow.lastAppliedLayoutVirtualRect,
+           let targetRect = joinWithTarget.lastAppliedLayoutVirtualRect {
+            let currentPos = currentRect.center.getProjection(newOrientation)
+            let targetPos = targetRect.center.getProjection(newOrientation)
+            currentWindowIndex = currentPos < targetPos ? 0 : INDEX_BIND_LAST
+        } else {
+            currentWindowIndex = direction.isPositive ? 0 : INDEX_BIND_LAST
+        }
+
         joinWithTarget.bind(to: newParent, adaptiveWeight: WEIGHT_AUTO, index: 0)
-        currentWindow.bind(to: newParent, adaptiveWeight: WEIGHT_AUTO, index: direction.isPositive ? 0 : INDEX_BIND_LAST)
+        currentWindow.bind(to: newParent, adaptiveWeight: WEIGHT_AUTO, index: currentWindowIndex)
         return true
     }
 }

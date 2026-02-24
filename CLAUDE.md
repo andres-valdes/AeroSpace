@@ -109,6 +109,10 @@ Runs SwiftFormat and SwiftLint (auto-downloads both via `script/install-dep.sh`)
 - `Package.swift` - SPM package definition (Swift 6.2, macOS 13+ deployment target)
 - `project.yml` - XcodeGen spec for generating `AeroSpace.xcodeproj`
 
+## Development workflow
+
+This project follows **test-driven development**. Every feature or behavior change must include corresponding tests. Write tests first or alongside the implementation — never ship code without tests.
+
 ## Key architectural notes
 
 - The `script/setup.sh` file is sourced by all scripts. It nukes `$PATH` to only `/bin:/usr/bin` plus `.deps/bin`, ensuring reproducible builds. The `swift` shell function routes through `swiftly`.

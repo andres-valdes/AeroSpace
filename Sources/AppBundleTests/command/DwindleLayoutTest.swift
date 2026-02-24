@@ -570,6 +570,70 @@ final class DwindleLayoutTest: XCTestCase {
         ]))
     }
 
+    /// join-with in dwindle uses spatial positioning along the dwindle-determined orientation.
+    /// Dwindle picks .v (tall target), so spatial comparison is along y-axis.
+    /// Without spatial logic, direction-based (.left = negative) would put w2 at bottom — spatial overrides this.
+    func testDwindle_joinWith_spatialPositioning() async throws {
+        let workspace = Workspace.get(byName: "a")
+        let root = workspace.rootTilingContainer
+        let w1 = TestWindow.new(id: 1, parent: root)
+        w1.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 0, width: 960, height: 1080) // tall → .v
+        let w2 = TestWindow.new(id: 2, parent: root)
+        w2.lastAppliedLayoutVirtualRect = .init(topLeftX: 960, topLeftY: 0, width: 960, height: 540) // top-right
+        assertEquals(w2.focusWindow(), true)
+        let w3 = TestWindow.new(id: 3, parent: root)
+
+        // w2 joins left into w1
+        // w1 is tall (960x1080) → dwindle picks .v orientation for new container
+        // Spatial along .v: w2 center y=270 < w1 center y=540 → w2 on top
+        try await JoinWithCommand(args: JoinWithCmdArgs(rawArgs: [], direction: .left)).run(.defaultEnv, .emptyStdin)
+
+        assertEquals(root.layoutDescription, .h_dwindle([
+            .v_dwindle([
+                .window(2),
+                .window(1),
+            ]),
+            .window(3),
+        ]))
+    }
+
+    /// When two siblings are the only children of a dwindle container and the dwindle-determined
+    /// orientation matches the parent's, fall back to opposite orientation. Otherwise normalization
+    /// flattens the singleton parent and the join becomes a no-op.
+    func testDwindle_joinWith_siblingPairFallsBackToOpposite() async throws {
+        let workspace = Workspace.get(byName: "a")
+        let root = workspace.rootTilingContainer.apply {
+            TestWindow.new(id: 1, parent: $0)
+        }
+        let hBranch = TilingContainer(parent: root, adaptiveWeight: 1, .h, .dwindle, index: INDEX_BIND_LAST)
+        let w2 = TestWindow.new(id: 2, parent: hBranch)
+        w2.lastAppliedLayoutVirtualRect = .init(topLeftX: 0, topLeftY: 540, width: 960, height: 540) // wide
+        let w3 = TestWindow.new(id: 3, parent: hBranch)
+        w3.lastAppliedLayoutVirtualRect = .init(topLeftX: 960, topLeftY: 540, width: 960, height: 540) // wide
+        assertEquals(w2.focusWindow(), true)
+
+        assertEquals(root.layoutDescription, .h_dwindle([
+            .window(1),
+            .h_dwindle([.window(2), .window(3)]),
+        ]))
+
+        // w3 is wide → dwindle would pick .h, same as parent. Should fall back to .v.
+        // Normalization is disabled in tests, so we can verify the new container orientation directly.
+        try await JoinWithCommand(args: JoinWithCmdArgs(rawArgs: [], direction: .right)).run(.defaultEnv, .emptyStdin)
+
+        // Both windows have the same y-center (same row), so spatial comparison
+        // along .v sees equal positions → w2 goes to INDEX_BIND_LAST
+        assertEquals(root.layoutDescription, .h_dwindle([
+            .window(1),
+            .h_dwindle([
+                .v_dwindle([
+                    .window(3),
+                    .window(2),
+                ]),
+            ]),
+        ]))
+    }
+
     /// join-with in a dwindle workspace where the target is a container (not a window)
     /// should fall back to parent.orientation.opposite for the new container orientation.
     func testDwindle_joinWith_containerTarget_fallback() async throws {
