@@ -401,6 +401,37 @@ final class ConfigTest: XCTestCase {
         ])
     }
 
+    func testParseFocusFollowsMouse() {
+        let (config1, errors1) = parseConfig(
+            """
+            focus-follows-mouse = true
+            """,
+        )
+        assertEquals(errors1, [])
+        assertEquals(config1.focusFollowsMouse, true)
+
+        let (config2, errors2) = parseConfig(
+            """
+            focus-follows-mouse = false
+            """,
+        )
+        assertEquals(errors2, [])
+        assertEquals(config2.focusFollowsMouse, false)
+    }
+
+    func testFocusFollowsMouseDefaultValue() {
+        assertEquals(defaultConfig.focusFollowsMouse, false)
+    }
+
+    func testFocusFollowsMouseTypeMismatch() {
+        let (_, errors) = parseConfig(
+            """
+            focus-follows-mouse = 'true'
+            """,
+        )
+        assertEquals(errors.descriptions, ["focus-follows-mouse: Expected type is 'bool'. But actual type is 'string'"])
+    }
+
     func testParseKeyMapping() {
         let (config, errors) = parseConfig(
             """

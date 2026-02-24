@@ -61,6 +61,12 @@ enum GlobalObserver {
             }
         }
 
+        NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { _ in
+            Task { @MainActor in
+                handleMouseMovedForFocusFollowsMouse()
+            }
+        }
+
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { _ in
             // todo reduce number of refreshSession in the callback
             //  resetManipulatedWithMouseIfPossible might call its own refreshSession
