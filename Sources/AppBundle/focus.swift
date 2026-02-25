@@ -143,13 +143,19 @@ extension Workspace {
     if onFocusChangedRecursionGuard { return }
     onFocusChangedRecursionGuard = true
     defer { onFocusChangedRecursionGuard = false }
-    if hasFocusChanged {
+
+    // Suppress on-focus-changed and on-focused-monitor-changed callbacks when focus was changed
+    // by focus-follows-mouse. The mouse is already at the desired position, so running move-mouse
+    // from these callbacks would create a feedback loop: FFM → move-mouse → synthetic mouseMoved → FFM → ...
+    let isFocusFollowsMouse: Bool = if case .focusFollowsMouse = refreshSessionEvent { true } else { false }
+
+    if hasFocusChanged, !isFocusFollowsMouse {
         onFocusChanged(focus)
     }
     if let _prevFocusedWorkspaceName, hasFocusedWorkspaceChanged {
         onWorkspaceChanged(_prevFocusedWorkspaceName, frozenFocus.workspaceName)
     }
-    if hasFocusedMonitorChanged {
+    if hasFocusedMonitorChanged, !isFocusFollowsMouse {
         onFocusedMonitorChanged(focus)
     }
 }
